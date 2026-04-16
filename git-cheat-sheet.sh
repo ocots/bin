@@ -1,0 +1,63 @@
+#!/bin/bash
+# alias gshit='/Users/ocots/bin/git-cheat-sheet.sh'
+# in ~/.zsh_aliases
+
+(
+cat << 'EOF'
+# Oh My Zsh - Git Cheat Sheet
+EOF
+
+printf "%-15s %s\n" "Alias" "Command"
+printf "%-15s %s\n" "-----" "------"
+
+printf "%-15s %s\n" "g" "git"
+printf "%-15s %s\n" "gst" "git status"
+printf "%-15s %s\n" "gl" "git pull"
+printf "%-15s %s\n" "gup" "git pull --rebase"
+printf "%-15s %s\n" "gp" "git push"
+printf "%-15s %s\n" "gd" "git diff"
+printf "%-15s %s\n" "gdc" "git diff --cached"
+printf "%-15s %s\n" "gdv" "git diff -w \"\$@\" | view -"
+printf "%-15s %s\n" "gc" "git commit -v"
+printf "%-15s %s\n" "gc!" "git commit -v --amend"
+printf "%-15s %s\n" "gca" "git commit -v -a"
+printf "%-15s %s\n" "gca!" "git commit -v -a --amend"
+printf "%-15s %s\n" "gcmsg" "git commit -m"
+printf "%-15s %s\n" "gco" "git checkout"
+printf "%-15s %s\n" "gcm" "git checkout master"
+printf "%-15s %s\n" "gr" "git remote"
+printf "%-15s %s\n" "grv" "git remote -v"
+printf "%-15s %s\n" "grmv" "git remote rename"
+printf "%-15s %s\n" "grrm" "git remote remove"
+printf "%-15s %s\n" "gsetr" "git remote set-url"
+printf "%-15s %s\n" "grup" "git remote update"
+printf "%-15s %s\n" "grbi" "git rebase -i"
+printf "%-15s %s\n" "grbc" "git rebase --continue"
+printf "%-15s %s\n" "grba" "git rebase --abort"
+printf "%-15s %s\n" "gb" "git branch"
+printf "%-15s %s\n" "gba" "git branch -a"
+printf "%-15s %s\n" "gcount" "git shortlog -sn"
+printf "%-15s %s\n" "gcl" "git config --list"
+printf "%-15s %s\n" "gcp" "git cherry-pick"
+printf "%-15s %s\n" "glg" "git log --stat --max-count=10"
+printf "%-15s %s\n" "glgg" "git log --graph --max-count=10"
+printf "%-15s %s\n" "glgga" "git log --graph --decorate --all"
+printf "%-15s %s\n" "glo" "git log --oneline --decorate --color"
+printf "%-15s %s\n" "glog" "git log --oneline --decorate --color --graph"
+printf "%-15s %s\n" "gss" "git status -s"
+printf "%-15s %s\n" "ga" "git add"
+printf "%-15s %s\n" "gm" "git merge"
+printf "%-15s %s\n" "grh" "git reset HEAD"
+printf "%-15s %s\n" "grhh" "git reset HEAD --hard"
+printf "%-15s %s\n" "gclean" "git reset --hard && git clean -dfx"
+printf "%-15s %s\n" "gwc" "git whatchanged -p --abbrev-commit --pretty=medium"
+printf "%-15s %s\n" "gsts" "git stash show --text"
+printf "%-15s %s\n" "gsta" "git stash"
+printf "%-15s %s\n" "gstp" "git stash pop"
+printf "%-15s %s\n" "gstd" "git stash drop"
+printf "%-15s %s\n" "ggpull" "git pull origin \$(current_branch)"
+printf "%-15s %s\n" "ggpur" "git pull --rebase origin \$(current_branch)"
+printf "%-15s %s\n" "ggpush" "git push origin \$(current_branch)"
+printf "%-15s %s\n" "ggpnp" "git pull origin \$(current_branch) && git push origin \$(current_branch)"
+printf "%-15s %s\n" "glp" "_git_log_prettily"
+) | less
