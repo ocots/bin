@@ -1,0 +1,18 @@
+#!/bin/zsh
+
+key="$(/usr/bin/security find-generic-password \
+  -s albert-api-key \
+  -w 2>/dev/null)" || {
+  print -u2 "Clé albert-api-key absente du trousseau"
+  exit 1
+}
+
+if [[ -z "$key" ]]; then
+  print -u2 "Clé albert-api-key vide"
+  exit 1
+fi
+
+export ALBERT_API_KEY="$key"
+unset key
+
+exec /opt/homebrew/bin/opencode "$@"
