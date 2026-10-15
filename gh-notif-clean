@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Nettoie les notifications GitHub (marque comme "Done") selon des règles."""
+import argparse
+import json
+import subprocess
+import sys
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+
+DEFAULT_ORGS = ["control-toolbox", "ocourses", "getacthub"]
+
+
+def gh(*args):
+    r = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip() or r.stdout.strip())
+    return r.stdout
+
+
+def fetch_notifications():
+    out = gh("--paginate", "--slurp", "notifications?all=true&per_page=100")
+    return [n for page in json.loads(out) for n in page]
+
+
+def subject_state(n):
+    url = n["subject"].get("url")
+    if not url:
+        return None
+    try:
+        return json.loads(gh(url.removeprefix("https://api.github.com/")))
+    except RuntimeError:
+        return None
+
+
+def classify(n, rules):
+    """Retourne le nom de la règle qui s'applique, ou None."""
+    s = n["subject"]
+    t = s["type"]
+    if t == "CheckSuite" and "ci-failed" in rules and "failed" in s["title"].lower():
+        return "ci-failed"
+    if t == "PullRequest" and rules & {"pr-merged", "pr-closed"}:
+        d = subject_state(n)
+        if d and d.get("merged") and "pr-merged" in rules:
+            return "pr-merged"
+        if d and d.get("state") == "closed" and not d.get("merged") and "pr-closed" in rules:
+            return "pr-closed"
+    if t == "Issue" and "issue-closed" in rules:
+        d = subject_state(n)
+        if d and d.get("state") == "closed":
+            return "issue-closed"
+    return None
+
+
+def main():
+    ALL = ["pr-merged", "pr-closed", "ci-failed", "issue-closed"]
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""\
+règles (--rules, séparées par des virgules, toutes actives par défaut):
+  pr-merged     PR mergées
+  pr-closed     PR fermées sans merge
+  issue-closed  issues fermées
+  ci-failed     CI en échec (titre contenant "failed")
+
+exemples:
+  gh-notif-clean --dry-run                      simulation + récap
+  gh-notif-clean --rules pr-merged              supprime seulement les PR mergées
+  gh-notif-clean --org ocourses --dry-run -v    une organisation, avec le détail
+""")
+    p.add_argument("--org", action="append", help=f"organisation (répétable, défaut: {', '.join(DEFAULT_ORGS)})")
+    p.add_argument("--dry-run", action="store_true", help="n'supprime rien, affiche seulement")
+    p.add_argument("--rules", default=",".join(ALL), help=f"règles actives, parmi: {','.join(ALL)}")
+    p.add_argument("-v", "--verbose", action="store_true", help="liste chaque notification concernée")
+    a = p.parse_args()
+
+    rules = set(filter(None, a.rules.split(",")))
+    if rules - set(ALL):
+        sys.exit(f"Règles inconnues: {', '.join(sorted(rules - set(ALL)))}")
+    orgs = {o.lower() for o in (a.org or DEFAULT_ORGS)}
+
+    try:
+        notifs = fetch_notifications()
+    except RuntimeError as e:
+        sys.exit(f"Erreur gh: {e}\n(scope manquant ? gh auth refresh -s notifications)")
+
+    scoped = [n for n in notifs if n["repository"]["owner"]["login"].lower() in orgs]
+    with ThreadPoolExecutor(8) as ex:
+        rule_of = list(ex.map(lambda n: classify(n, rules), scoped))
+    targets = [(n, r) for n, r in zip(scoped, rule_of) if r]
+
+    if a.verbose or a.dry_run:
+        for n, r in targets:
+            print(f"[{r}] {n['repository']['full_name']}: {n['subject']['title']}")
+
+    deleted, errors = [], 0
+    if not a.dry_run:
+        def delete(item):
+            try:
+                gh("-X", "DELETE", f"notifications/threads/{item[0]['id']}")
+                return item
+            except RuntimeError:
+                return None
+        with ThreadPoolExecutor(8) as ex:
+            for res in ex.map(delete, targets):
+                deleted.append(res) if res else None
+        errors = len(targets) - len(deleted)
+
+    unread = sum(n["unread"] for n in notifs)
+    verb = "seraient supprimées" if a.dry_run else "supprimées"
+    print("\n=== Récap ===" + (" (dry-run)" if a.dry_run else ""))
+    print(f"Total (toutes orgs)      : {len(notifs)}  (non lues: {unread}, lues: {len(notifs) - unread})")
+    print(f"Orgs ciblées             : {', '.join(sorted(orgs))}")
+    print(f"Notifications ciblées    : {len(scoped)}")
+    print(f"Notifications {verb}: {len(targets) if a.dry_run else len(deleted)}")
+    for k, v in sorted(Counter(r for _, r in targets).items()):
+        print(f"  - {k}: {v}")
+    for k, v in sorted(Counter(n["repository"]["owner"]["login"] for n, _ in targets).items()):
+        print(f"  @ {k}: {v}")
+    if errors:
+        print(f"Erreurs de suppression   : {errors}")
+
+
+if __name__ == "__main__":
+    main()
