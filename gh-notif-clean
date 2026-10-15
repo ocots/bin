@@ -32,12 +32,21 @@ def subject_state(n):
         return None
 
 
+def is_registry(n):
+    return n["repository"]["full_name"] == "JuliaRegistries/General" and n["subject"]["title"].startswith(("New version:", "New package:"))
+
+
 def classify(n, rules):
     """Retourne le nom de la règle qui s'applique, ou None."""
     s = n["subject"]
     t = s["type"]
     if t == "CheckSuite" and "ci-failed" in rules and "failed" in s["title"].lower():
         return "ci-failed"
+    if t == "PullRequest" and is_registry(n) and "registry" in rules:
+        d = subject_state(n)
+        if d and d.get("state") == "closed":
+            return "registry"
+        return None
     if t == "PullRequest" and rules & {"pr-merged", "pr-closed"}:
         d = subject_state(n)
         if d and d.get("merged") and "pr-merged" in rules:
@@ -52,12 +61,13 @@ def classify(n, rules):
 
 
 def main():
-    ALL = ["pr-merged", "pr-closed", "ci-failed", "issue-closed"]
+    ALL = ["pr-merged", "pr-closed", "ci-failed", "issue-closed", "registry"]
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""\
 règles (--rules, séparées par des virgules, toutes actives par défaut):
   pr-merged     PR mergées
   pr-closed     PR fermées sans merge
   issue-closed  issues fermées
+  registry      PR "New version:/New package:" de JuliaRegistries/General (fermées/mergées, hors filtre --org)
   ci-failed     CI en échec (titre contenant "failed")
 
 exemples:
@@ -81,7 +91,7 @@ exemples:
     except RuntimeError as e:
         sys.exit(f"Erreur gh: {e}\n(scope manquant ? gh auth refresh -s notifications)")
 
-    scoped = [n for n in notifs if n["repository"]["owner"]["login"].lower() in orgs]
+    scoped = [n for n in notifs if n["repository"]["owner"]["login"].lower() in orgs or ("registry" in rules and is_registry(n))]
     with ThreadPoolExecutor(8) as ex:
         rule_of = list(ex.map(lambda n: classify(n, rules), scoped))
     targets = [(n, r) for n, r in zip(scoped, rule_of) if r]
