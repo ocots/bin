@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nettoie les notifications GitHub (marque comme "Done") selon des règles."""
+"""Clean up GitHub notifications (mark them as "Done") according to rules."""
 import argparse
 import json
 import subprocess
@@ -7,10 +7,12 @@ import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
+# Organizations cleaned by default (override with --org)
 DEFAULT_ORGS = ["control-toolbox", "ocourses", "getacthub"]
 
 
 def gh(*args):
+    """Call `gh api` with the given arguments and return its stdout."""
     r = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr.strip() or r.stdout.strip())
@@ -18,11 +20,13 @@ def gh(*args):
 
 
 def fetch_notifications():
+    """Fetch all notifications (read and unread), across all pages."""
     out = gh("--paginate", "--slurp", "notifications?all=true&per_page=100")
     return [n for page in json.loads(out) for n in page]
 
 
 def subject_state(n):
+    """Fetch the PR/issue behind a notification (to read its state/merged)."""
     url = n["subject"].get("url")
     if not url:
         return None
@@ -33,26 +37,35 @@ def subject_state(n):
 
 
 def is_registry(n):
+    """True for Registrator PRs ("New version: ..." / "New package: ...") in JuliaRegistries/General."""
     return n["repository"]["full_name"] == "JuliaRegistries/General" and n["subject"]["title"].startswith(("New version:", "New package:"))
 
 
 def classify(n, rules):
-    """Retourne le nom de la règle qui s'applique, ou None."""
+    """Return the name of the rule matching this notification, or None.
+
+    Rules are mutually exclusive: the first match wins, so a notification
+    is never counted (or deleted) twice.
+    """
     s = n["subject"]
     t = s["type"]
+    # Failed CI workflow runs (CheckSuite notifications titled "... failed ...")
     if t == "CheckSuite" and "ci-failed" in rules and "failed" in s["title"].lower():
         return "ci-failed"
+    # Registry PRs: only once they are no longer open (merged or closed)
     if t == "PullRequest" and is_registry(n) and "registry" in rules:
         d = subject_state(n)
         if d and d.get("state") == "closed":
             return "registry"
         return None
+    # Regular PRs: merged, or closed without being merged
     if t == "PullRequest" and rules & {"pr-merged", "pr-closed"}:
         d = subject_state(n)
         if d and d.get("merged") and "pr-merged" in rules:
             return "pr-merged"
         if d and d.get("state") == "closed" and not d.get("merged") and "pr-closed" in rules:
             return "pr-closed"
+    # Closed issues
     if t == "Issue" and "issue-closed" in rules:
         d = subject_state(n)
         if d and d.get("state") == "closed":
@@ -63,35 +76,37 @@ def classify(n, rules):
 def main():
     ALL = ["pr-merged", "pr-closed", "ci-failed", "issue-closed", "registry"]
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""\
-règles (--rules, séparées par des virgules, toutes actives par défaut):
-  pr-merged     PR mergées
-  pr-closed     PR fermées sans merge
-  issue-closed  issues fermées
-  registry      PR "New version:/New package:" de JuliaRegistries/General (fermées/mergées, hors filtre --org)
-  ci-failed     CI en échec (titre contenant "failed")
+rules (--rules, comma-separated, all enabled by default):
+  pr-merged     merged PRs
+  pr-closed     PRs closed without merge
+  issue-closed  closed issues
+  registry      "New version:/New package:" PRs of JuliaRegistries/General (merged/closed, ignores --org)
+  ci-failed     failed CI runs (title containing "failed")
 
-exemples:
-  gh-notif-clean --dry-run                      simulation + récap
-  gh-notif-clean --rules pr-merged              supprime seulement les PR mergées
-  gh-notif-clean --org ocourses --dry-run -v    une organisation, avec le détail
+examples:
+  gh-notif-clean --dry-run                      simulate + summary
+  gh-notif-clean --rules pr-merged              only delete merged PRs
+  gh-notif-clean --org ocourses --dry-run -v    one organization, with details
 """)
-    p.add_argument("--org", action="append", help=f"organisation (répétable, défaut: {', '.join(DEFAULT_ORGS)})")
-    p.add_argument("--dry-run", action="store_true", help="n'supprime rien, affiche seulement")
-    p.add_argument("--rules", default=",".join(ALL), help=f"règles actives, parmi: {','.join(ALL)}")
-    p.add_argument("-v", "--verbose", action="store_true", help="liste chaque notification concernée")
+    p.add_argument("--org", action="append", help=f"organization (repeatable, default: {', '.join(DEFAULT_ORGS)})")
+    p.add_argument("--dry-run", action="store_true", help="delete nothing, only show what would be deleted")
+    p.add_argument("--rules", default=",".join(ALL), help=f"enabled rules, among: {','.join(ALL)}")
+    p.add_argument("-v", "--verbose", action="store_true", help="list every matching notification")
     a = p.parse_args()
 
     rules = set(filter(None, a.rules.split(",")))
     if rules - set(ALL):
-        sys.exit(f"Règles inconnues: {', '.join(sorted(rules - set(ALL)))}")
+        sys.exit(f"Unknown rules: {', '.join(sorted(rules - set(ALL)))}")
     orgs = {o.lower() for o in (a.org or DEFAULT_ORGS)}
 
     try:
         notifs = fetch_notifications()
     except RuntimeError as e:
-        sys.exit(f"Erreur gh: {e}\n(scope manquant ? gh auth refresh -s notifications)")
+        sys.exit(f"gh error: {e}\n(missing scope? run: gh auth refresh -s notifications)")
 
+    # Restrict to the selected orgs (the registry rule bypasses the org filter)
     scoped = [n for n in notifs if n["repository"]["owner"]["login"].lower() in orgs or ("registry" in rules and is_registry(n))]
+    # Classify in parallel: each PR/issue check is one API call
     with ThreadPoolExecutor(8) as ex:
         rule_of = list(ex.map(lambda n: classify(n, rules), scoped))
     targets = [(n, r) for n, r in zip(scoped, rule_of) if r]
@@ -103,6 +118,7 @@ exemples:
     deleted, errors = [], 0
     if not a.dry_run:
         def delete(item):
+            # DELETE on a thread marks it as "Done" (removed from the inbox)
             try:
                 gh("-X", "DELETE", f"notifications/threads/{item[0]['id']}")
                 return item
@@ -113,19 +129,20 @@ exemples:
                 deleted.append(res) if res else None
         errors = len(targets) - len(deleted)
 
+    # Summary (printed in dry-run and real mode)
     unread = sum(n["unread"] for n in notifs)
-    verb = "seraient supprimées" if a.dry_run else "supprimées"
-    print("\n=== Récap ===" + (" (dry-run)" if a.dry_run else ""))
-    print(f"Total (toutes orgs)      : {len(notifs)}  (non lues: {unread}, lues: {len(notifs) - unread})")
-    print(f"Orgs ciblées             : {', '.join(sorted(orgs))}")
-    print(f"Notifications ciblées    : {len(scoped)}")
+    verb = "would be deleted" if a.dry_run else "deleted"
+    print("\n=== Summary ===" + (" (dry-run)" if a.dry_run else ""))
+    print(f"Total (all orgs)        : {len(notifs)}  (unread: {unread}, read: {len(notifs) - unread})")
+    print(f"Selected orgs           : {', '.join(sorted(orgs))}")
+    print(f"Notifications in scope  : {len(scoped)}")
     print(f"Notifications {verb}: {len(targets) if a.dry_run else len(deleted)}")
     for k, v in sorted(Counter(r for _, r in targets).items()):
         print(f"  - {k}: {v}")
     for k, v in sorted(Counter(n["repository"]["owner"]["login"] for n, _ in targets).items()):
         print(f"  @ {k}: {v}")
     if errors:
-        print(f"Erreurs de suppression   : {errors}")
+        print(f"Deletion errors         : {errors}")
 
 
 if __name__ == "__main__":
