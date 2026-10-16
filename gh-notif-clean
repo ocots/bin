@@ -7,10 +7,6 @@ import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-# Organizations cleaned by default (override with --org)
-DEFAULT_ORGS = ["control-toolbox", "ocourses", "getacthub"]
-
-
 def gh(*args):
     """Call `gh api` with the given arguments and return its stdout."""
     r = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
@@ -75,37 +71,71 @@ def classify(n, rules):
 
 def main():
     ALL = ["pr-merged", "pr-closed", "ci-failed", "issue-closed", "registry"]
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""\
+    p = argparse.ArgumentParser(
+        prog="gh-notif-clean",
+        description=__doc__ + """
+Notifications are fetched with the `gh` CLI (read AND unread ones). Each
+notification matching an enabled rule is deleted, i.e. marked as "Done" on
+GitHub: it disappears from the inbox, but the PR/issue itself is untouched.
+Always try --dry-run first.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
 rules (--rules, comma-separated, all enabled by default):
-  pr-merged     merged PRs
-  pr-closed     PRs closed without merge
+  pr-merged     merged pull requests
+  pr-closed     pull requests closed without being merged
   issue-closed  closed issues
-  registry      "New version:/New package:" PRs of JuliaRegistries/General (merged/closed, ignores --org)
-  ci-failed     failed CI runs (title containing "failed")
+  ci-failed     failed CI runs (notification title containing "failed")
+  registry      "New version:" / "New package:" PRs of JuliaRegistries/General,
+                once merged or closed. This rule ignores --org and --repo.
+Each notification matches at most one rule, so it is never counted twice.
+
+scope (--org / --repo):
+  Without --org and --repo, every notification of your inbox is in scope.
+  --org OWNER   keep notifications of repositories owned by OWNER (an
+                organization or a user), e.g. --org control-toolbox
+  --repo O/R    keep notifications of the repository O/R,
+                e.g. --repo control-toolbox/CTBase.jl
+  Both can be repeated and are case-insensitive. They are cumulative: a
+  notification is kept if its owner is in --org OR its repository is in
+  --repo (--org ocourses --repo control-toolbox/CTBase.jl keeps both).
 
 examples:
-  gh-notif-clean --dry-run                      simulate + summary
-  gh-notif-clean --rules pr-merged              only delete merged PRs
-  gh-notif-clean --org ocourses --dry-run -v    one organization, with details
+  gh-notif-clean --dry-run                          simulate on everything + summary
+  gh-notif-clean --dry-run -v                       same, listing each notification
+  gh-notif-clean                                    really delete (all rules, all orgs)
+  gh-notif-clean --rules pr-merged,issue-closed     only these two rules
+  gh-notif-clean --org ocourses --org control-toolbox
+  gh-notif-clean --repo control-toolbox/CTBase.jl --dry-run
+  gh-notif-clean --org ocourses --repo control-toolbox/CTBase.jl
+
+requirements:
+  `gh` installed and logged in, with the "notifications" scope
+  (gh auth refresh -s notifications).
 """)
-    p.add_argument("--org", action="append", help=f"organization (repeatable, default: {', '.join(DEFAULT_ORGS)})")
-    p.add_argument("--dry-run", action="store_true", help="delete nothing, only show what would be deleted")
-    p.add_argument("--rules", default=",".join(ALL), help=f"enabled rules, among: {','.join(ALL)}")
-    p.add_argument("-v", "--verbose", action="store_true", help="list every matching notification")
+    p.add_argument("--org", action="append", metavar="OWNER", help="only this organization/user (repeatable, case-insensitive, cumulative with --repo; default: all)")
+    p.add_argument("--repo", action="append", metavar="OWNER/NAME", help="only this repository (repeatable, case-insensitive, cumulative with --org)")
+    p.add_argument("--rules", default=",".join(ALL), metavar="RULES", help=f"comma-separated rules to apply (default: all): {','.join(ALL)}")
+    p.add_argument("--dry-run", action="store_true", help="delete nothing: list what would be deleted and print the summary")
+    p.add_argument("-v", "--verbose", action="store_true", help="list every notification to delete (always on with --dry-run)")
     a = p.parse_args()
 
     rules = set(filter(None, a.rules.split(",")))
     if rules - set(ALL):
         sys.exit(f"Unknown rules: {', '.join(sorted(rules - set(ALL)))}")
-    orgs = {o.lower() for o in (a.org or DEFAULT_ORGS)}
+    orgs = {o.lower() for o in a.org or []}  # empty set = no org filter
+    repos = {r.lower() for r in a.repo or []}
 
     try:
         notifs = fetch_notifications()
     except RuntimeError as e:
         sys.exit(f"gh error: {e}\n(missing scope? run: gh auth refresh -s notifications)")
 
-    # Restrict to the selected orgs (the registry rule bypasses the org filter)
-    scoped = [n for n in notifs if n["repository"]["owner"]["login"].lower() in orgs or ("registry" in rules and is_registry(n))]
+    # Restrict to the selected orgs and/or repos if any (cumulative: org OR repo).
+    # The registry rule bypasses this filter.
+    def in_scope(n):
+        r = n["repository"]
+        return (not orgs and not repos) or r["owner"]["login"].lower() in orgs or r["full_name"].lower() in repos or ("registry" in rules and is_registry(n))
+    scoped = [n for n in notifs if in_scope(n)]
     # Classify in parallel: each PR/issue check is one API call
     with ThreadPoolExecutor(8) as ex:
         rule_of = list(ex.map(lambda n: classify(n, rules), scoped))
@@ -134,7 +164,10 @@ examples:
     verb = "would be deleted" if a.dry_run else "deleted"
     print("\n=== Summary ===" + (" (dry-run)" if a.dry_run else ""))
     print(f"Total (all orgs)        : {len(notifs)}  (unread: {unread}, read: {len(notifs) - unread})")
-    print(f"Selected orgs           : {', '.join(sorted(orgs))}")
+    if orgs or not repos:
+        print(f"Selected orgs           : {', '.join(sorted(orgs)) or 'all'}")
+    if repos:
+        print(f"Selected repos          : {', '.join(sorted(repos))}")
     print(f"Notifications in scope  : {len(scoped)}")
     print(f"Notifications {verb}: {len(targets) if a.dry_run else len(deleted)}")
     for k, v in sorted(Counter(r for _, r in targets).items()):
